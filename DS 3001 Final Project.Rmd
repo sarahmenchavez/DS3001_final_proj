@@ -1,0 +1,284 @@
+---
+title: "Best Value Universities"
+author: "Madeleine Jones, Audrey Himes, Hayden Ratliff"
+date: "12/01/2021"
+output: 
+  html_document:
+    toc: TRUE
+    toc_float: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(caret)
+library(class)
+library(plotly)
+library(RColorBrewer)
+library(ROCR)
+library(MLmetrics)
+library(ggpubr)
+library(e1071)  # load all of the libraries needed for the lab
+library(plotly)
+library(htmltools)
+library(devtools)
+library(NbClust)
+library(DT)
+```
+
+## Question and Background Information 
+What are the best value colleges? We will be looking at tuition and other metrics such as graduation rates, etc to determine which colleges are the best value?
+
+## Exploratory Data Analysis 
+### Read and Clean the Data 
+```{r}
+data<- read.csv("/Users/mj/Desktop/2021 Fall/DS 3001/DS-3001/Final Project/College_Data.csv")  # reading in the data set 
+
+data <- data %>% rename(College = X, AppsRecieved = Apps, AppsAccepted = Accept, NewStudentsEnrolled = Enroll, Top10Percent = Top10perc, Top25Percent = Top25perc, FullTimeUndergrads = F.Undergrad, PartTimeUndergrads = P.Undergrad, OutStateTuition = Outstate, RoomBoardCosts = Room.Board, BooksCost = Books, PersonalSpendings = Personal, FacultyPhDPercentage = PhD, FacultyTerminalPercentage = Terminal, StudentFacultyRatio = S.F.Ratio, DonatingAlumniPercentage = perc.alumni, ExpenditurePerStudent = Expend, GraduationRate = Grad.Rate)  # relabel the columns with more understandable names
+
+data$Private <- as.factor(data$Private)
+
+data$Private<-as.factor(ifelse(data$Private == "Yes",1,0))
+
+data <- data[complete.cases(data), ]
+
+data[which(data$GraduationRate > 100), "GraduationRate"] <- 100
+
+str(data)
+```
+
+### Numeric Variable Correlations with Salary
+
+```{r}
+numeric <- names(select_if(data, is.numeric))  # select the column labels from the numeric columns
+numericdata <- data[,numeric]  # create a table of the numeric data columns
+tuition<- numericdata[,8]  # save salary as its own vector for comparison
+numericvars <- numericdata[,-8]  # save other numeric variables in table for comparison
+
+cors = data.frame(CorrelationWithTuition = apply(numericvars, 2, function(x) cor(tuition, x)))  # apply the correlation function to the salary vector and all columns of the numeric variable table to determine which variables are most correlated to salary
+cors <- arrange(cors, -abs(CorrelationWithTuition))
+datatable(cors)
+```
+
+The variables with the greatest correlation to tuition are those that will be the most informative of varying university quality based on price.  Therefore, the highly correlated variables will be best to cluster the data and determine which universities are the best value. The variables with strong correlations above 0.5, or below -0.5 are University Expenditure Per Student, Room and Board Costs, Graduation Rate, the Percentage of Alumni who Donate, the Percentage of Students in the Top 10% of their Class, and the Student to Faculty Ratio.  
+
+Noting, however, that room and board is another cost to the student rather than an offering of the university similar to tuition, this metric will only be used in clustering, but will not be used in modeled when determining value,.  Therefore, the variables we will use to model the value of universities are Expenditure Per Student, Graduation Rate, the Percentage of Alumni who Donate, the Percentage of Students in the Top 10% of their Class, and the Student to Faculty Ratio.
+
+## Methods 
+In order to determine the patterns that exist among university attributes, we will use a k-means clustering algorithm.  K-means is an unsupervised algorithm in which clustering of data occurs by minimizing the variance, or distance, between intra-cluster data and maximizing the variance between inter-cluster data points.  With the k-means clustering algorithm, we will cluster universities into those that are of higher or lower quality.  Then, we will examine university tuitions to determine which universities are the "best value," with high quality and low tuition.
+
+### Standardizing The Numeric Variables 
+To ensure that our algorithm runs correctly with fair consideration of each variable, we will standardize the numeric university attributes so that they are all scaled equally.  
+```{r}
+corvars<- c("ExpenditurePerStudent", "RoomBoardCosts", "GraduationRate", "DonatingAlumniPercentage", "Top10Percent", "StudentFacultyRatio")
+corvars <- numericvars[,corvars] 
+standardized <- scale(corvars)  # scale standardizes the variables so that they are centered around 0 and vary by a standard deviation of 1 
+datatable(standardized) # output the table
+```
+
+### Determining How Many Clusters to Use {.tabset}
+Both the elbow plot and NbClust method indicate the 3 clusters is a good choice for the data.  The elbow plot "kinks" to indicate diminishing returns around k=3 and 8 of the k-means algorithms chose 3 clusters most often.  Although, 9 of the k-means algorithms chose 2 clusters most often, the increased explained variability in the elbow plot appears significant enough to use 3 clusters instead of 2.  Therefore, we will make our model with 3 clusters.  
+
+#### Elbow Plot
+
+```{r}
+# explained variance function will take data and a specific number of clusters and output the corresponding variance explained
+explained_variance = function(data_in, k){   
+  
+  set.seed(1)  # set seed for reproducibility
+  kmeans_obj = kmeans(data_in, centers = k, algorithm = "Lloyd", iter.max = 30) # Running the k-means algorithm with euclidean distance
+  
+  # Calculate the variance accounted for by clusters:
+  # var_exp = intercluster variance / total variance
+  var_exp = kmeans_obj$betweenss / kmeans_obj$totss
+  var_exp  
+}
+
+explained_var_list = sapply(1:20, explained_variance, data_in = standardized)  # run the explained_variance function with the numeric variable data and cluster numbers 1 through 10
+
+elbow_data = data.frame(k = 1:20, Explained_Variance= explained_var_list)  # put explained_variance output in dataframe with corresponding k value to use for plotting
+
+#Create a elbow chart of the output of the explained_variance function run
+ggplot(elbow_data,   # create a ggplot using the elbow chart data
+       aes(x = k,  # use k on the x axis and explained variance on the y axis
+           y = Explained_Variance)) + 
+  geom_point(size = 4) +           # set the size of the data points
+  geom_line(size = 1) +            # set the thickness of the line
+  ggtitle('Variance Explained by Different Cluster Numbers') +  # title the graph
+  xlab('k') +   # label the x and y axes
+  ylab('Inter-cluster Variance / Total Variance') + 
+  theme_bw()  # use the ggplot theme black and white to display
+
+```
+
+The Elbow Plot graphs the explained variance of the model with different cluster numbers.  When the graph begins to plateau, this indicates that the increasing complexity is providing decreasing information, a phenomena called diminishing returns.  Therefore, we want a cluster number that provides the most explained variance before diminishing returns begin.  
+
+#### NBClust: K by Majority Vote 
+
+```{r}
+set.seed(1)  # set starting point for reproducibility
+nbclust_obj = NbClust(data = standardized, method = "kmeans")  # Use the NBClust method to run many approaches of k-means and output the most frequent cluster number chosen by each approach
+
+freq_k = nbclust_obj$Best.nc[1,]  # subset the first row of the best.nc output which states the k chosen by each approach
+freq_k = data.frame(Number_of_Clusters_Recommended = freq_k)  # convert row to a data frame so that it can be plotted by ggplot
+
+# Plot the frequency of clusters selected by methods
+ggplot(freq_k,   # creates a plot using the frequency data fame
+       aes(x = Number_of_Clusters_Recommended)) +  # plots the recommended clusters on the x axis
+  geom_bar() +  # makes a bar chart
+  scale_x_continuous(breaks = seq(0, 15, by = 1)) +  # sets the x and y axis ticks
+  scale_y_continuous(breaks = seq(0, 15, by = 1)) +
+  labs(x = "Number of Clusters",  # labels the title of the plot and the axes
+       y = "Number of Votes",
+       title = "NBClust Cluster Analysis") + 
+  theme_bw()  # use the ggplot theme black and white to display
+```
+
+The NBClust method runs a variety of approaches to the k-means clustering algorithm and returns the number of clusters that each approach chose most often to evaluate the data.  The plot above summarizes the number of approaches that chose each cluster number most often.  This method of determining cluster number is through majority vote.  
+
+### Run K-Means Algorithm using 3 Clusters
+From our 3 cluster model, it appears that the first cluster is likely the poorer quality schools with the smallest expenditure per student, graduation rate, donating alumni percentages, and percentage students in the Top 10% of their classes, and biggest student to faculty ratio. The second cluster is likely higher quality schools with the largest expenditure per student, graduation rate, donating alumni percentages, and percentage students in the Top 10% of their classes, and smallest student to faculty ratio. Finally the third cluster is more mid-range universities.  
+
+```{r}
+set.seed(1)  # sets the starting point for R to run the algorithm so that the results are reproducible
+kmeans_obj = kmeans(standardized, centers = 3, # implements the k-means method with 3 centroids 
+                        algorithm = "Lloyd")   # using the euchlidean distance method
+
+kmeans_obj  # prints the result of the k-means algorithm 
+
+head(kmeans_obj) # prints the results of each output from the k-means algorithm
+```
+
+### Modeling and Results of Clusters {.tabset}
+#### Graduation Rate vs Students in the Top 10% of Class
+
+```{r}
+clusters = as.factor(kmeans_obj$cluster)  # converts the cluster variable to factor rather than numeric so that when graphing they can be used as categories
+
+plotting <- data.frame(corvars, tuition, clusters)  # combine the numeric variables and the salary data into a data frame 
+
+plotting <- data.frame(plotting, College = data$College)  # combine the numeric variables and salary data with the player names column
+
+fig1 <- plot_ly(plotting, # create a plotly graphic
+               type = "scatter",  # make it a scatterplot 
+               mode="markers",
+               symbol = ~clusters,  # make the point shape based on the cluster column
+               x = ~GraduationRate, # make x axis Games Started column
+               y = ~Top10Percent, # make y axis FieldGoals column
+               color = ~tuition,  # color the points based on the tuition column
+               symbols = c(0,1,5),  # make the symbols, open circle, square, and triangle
+               text = ~paste('College:',College,  # hover text for college and tuition
+                             "Tuition:",tuition))
+
+
+fig1 
+```
+
+The two universities that stand out with relatively high graduation rates and percentages of students in the top 10% of their class, with low tuitions around 10k or less are Georgia Tech and UNC at Chapel Hill.  
+
+#### Expenditure Per Student vs Student to Faculty Ratio
+
+```{r}
+fig2 <- plot_ly(plotting, # create a plotly graphic
+               type = "scatter",  # make it a scatterplot 
+               mode="markers",
+               symbol = ~clusters,  # make the point shape based on the cluster column
+               x = ~log(ExpenditurePerStudent), # make x axis Games Started column
+               y = ~log(StudentFacultyRatio), # make y axis FieldGoals column
+               color = ~tuition,  # color the points based on the tuition column
+               symbols = c(0,1,5),  # make the symbols, open circle, square, and triangle
+               text = ~paste('College:',College,  # hover text for college and tuition
+                             "Tuition:",tuition))
+
+
+fig2 
+```
+
+The two universities that stand out with relatively high expenditures per student and low student to faculty ratios, with low tuitions around 10k or less are Creighton University and UNC at Chapel Hill.  
+
+#### Graduation Rate vs Donating Alumni Percentage
+```{r}
+fig3 <- plot_ly(plotting, # create a plotly graphic
+               type = "scatter",  # make it a scatterplot 
+               mode="markers",
+               symbol = ~clusters,  # make the point shape based on the cluster column
+               x = ~GraduationRate, # make x axis Games Started column
+               y = ~DonatingAlumniPercentage, # make y axis FieldGoals column
+               color = ~tuition,  # color the points based on the tuition column
+               symbols = c(0,1,5),  # make the symbols, open circle, square, and triangle
+               text = ~paste('College:',College,  # hover text for college and tuition
+                             "Tuition:",tuition))
+
+
+fig3 
+```
+
+The only university which stands out with a high graduation rate and a high percentage of alumni who donate is Mary Baldwin University.  This is likely because the metric "DonatingAlumniPercentage" will be high for smaller private schools which require private funding.  
+
+## Evaluation
+- prof wright said to look at explained variation and also just how the clustering appears in general from the graphics. he said to find a graphic that models the clusters well to indicate that the clustering algorithm worked (im thinking the first plot shows this the best)
+
+## Fairness Assessment 
+
+## Conclusions 
+Overall, the University of North Carolina at Chapel Hill appears to be university that stands out among the rest as high quality and low cost.  UNC at Chapel Hill has a graduation rate of 83% and a percentage of students coming from the top 10% of their class at 75% which indicates the high academic standing of its student body.  Further, the school focuses many resources on each of its students with an expenditure on each student of around $16,000 and a low student to faculty ratio of roughly 9 to 1.   While its percentage of donating alumni is only 23%, this is likely because it is a public school and thus has state funding, as opposed to smaller private schools which rely more heavily on alumni donations.  Finally, UNC at Chapel Hill has a tuition of \$8,400 per semester which is lower than many of the other universities in this high quality cluster.  
+
+
+## Future Work 
+In future work, there are some additions to the data that could be useful.  First, the data set only contains information for 777 universities in the United States.  Given that there are roughly 4,000 degree granting universities in the US according to the US Department of Education, this data set could be expanded greatly to both better our clustering algorithm with more information and introduce other best value schools which have not been considered (https://www.usnews.com/education/best-colleges/articles/how-many-universities-are-in-the-us-and-why-that-number-is-changing).  Second, the data set only records out-of-state tuition so when looking for low cost schools, only out-of-state tuition is considered.  Given that public schools offer a, usually much lower, in-state cost, this could alter our evaluation of low cost schools.  Particularly on an individual basis, some schools might be low-cost to those living in the respective school's state while they are high-cost to those living outside of the state.  Finally, this data was collected in 2019 so it is outdated for the current 2021 year.  Specifically with tuition cost increasing significantly each year, the tuition variable needs to be updated in order for the analysis to be applicable for today's students.  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
